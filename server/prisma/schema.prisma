@@ -1,0 +1,201 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUBMITTER
+  OFFICER
+  ADMIN
+}
+
+enum DocType {
+  PASSPORT
+  VISA
+  NATIONAL_ID
+  DRIVING_LICENSE
+  PAN
+  PERMIT
+}
+
+enum DocStatus {
+  PENDING
+  PROCESSING
+  VERIFIED
+  FAILED
+}
+
+enum Verdict {
+  PASS
+  REVIEW
+  FAIL
+}
+
+enum Decision {
+  APPROVE
+  REJECT
+}
+
+enum UserStatus {
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id                 String           @id @default(uuid())
+  email              String           @unique
+  passwordHash       String
+  name               String
+  role               Role             @default(SUBMITTER)
+  status             UserStatus       @default(APPROVED)
+  approvedById       String?
+  approvedBy         User?            @relation("UserApprovals", fields: [approvedById], references: [id])
+  approvedAt         DateTime?
+  approvals          User[]           @relation("UserApprovals")
+  registrationReason String?
+  contactNumber      String?
+  isActive           Boolean          @default(true)
+  deletedAt          DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  documents       Document[]
+  reviewDecisions ReviewDecision[]
+  auditLogs       AuditLog[]
+  refreshTokens   RefreshToken[]
+
+  @@index([email])
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([tokenHash])
+}
+
+model Document {
+  id               String      @id @default(uuid())
+  submitterId      String
+  submitter        User        @relation(fields: [submitterId], references: [id])
+  docType          DocType
+  filePath         String
+  fileHash         String
+  originalFilename String
+  mimeType         String
+  sizeBytes        Int
+  status           DocStatus   @default(PENDING)
+  deletedAt        DateTime?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  
+  deviceHashId     String?
+  deviceFingerprint DeviceFingerprint? @relation(fields: [deviceHashId], references: [id])
+
+  verifications   Verification[]
+  reviewDecisions ReviewDecision[]
+
+  @@index([submitterId])
+  @@index([fileHash])
+  @@index([deviceHashId])
+}
+
+model Verification {
+  id                   String   @id @default(uuid())
+  documentId           String
+  document             Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  extractedName        String?
+  extractedDocNumber   String?
+  extractedDob         String?
+  extractedNationality String?
+  extractedExpiry      String?
+  extractedGender      String?
+  layers               Json
+  overallScore         Float
+  verdict              Verdict
+  engineVersion        String
+  
+  efirHit              Boolean  @default(false)
+  amlHit               Boolean  @default(false)
+  courtHistoryHit      Boolean  @default(false)
+  networkFlags         Json?
+
+  createdAt            DateTime @default(now())
+
+  @@index([documentId])
+  @@index([extractedDocNumber])
+}
+
+model ReviewDecision {
+  id         String   @id @default(uuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  reviewerId String
+  reviewer   User     @relation(fields: [reviewerId], references: [id])
+  decision   Decision
+  notes      String   @db.Text
+  createdAt  DateTime @default(now())
+
+  @@index([documentId])
+  @@index([reviewerId])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action     String
+  entityType String
+  entityId   String
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([actorId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+model DeviceFingerprint {
+  id         String   @id @default(cuid())
+  deviceHash String   @unique
+  ipAddress  String
+  userAgent  String
+  lastSeenAt DateTime @default(now()) @updatedAt
+
+  documents      Document[]
+  velocityEvents VelocityEvent[]
+}
+
+model VelocityEvent {
+  id         String   @id @default(cuid())
+  deviceHash String
+  actionType String
+  timestamp  DateTime @default(now())
+  
+  device     DeviceFingerprint @relation(fields: [deviceHash], references: [deviceHash])
+
+  @@index([deviceHash, timestamp])
+}
+
+model GlobalWatchlist {
+  id          String   @id @default(cuid())
+  entityType  String
+  entityValue String
+  threatLevel String
+  createdAt   DateTime @default(now())
+
+  @@index([entityValue])
+}

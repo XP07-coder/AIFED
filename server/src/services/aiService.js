@@ -1,0 +1,222 @@
+import axios from "axios";
+import fs from "fs";
+import FormData from "form-data";
+import { env } from "../config/env.js";
+import { logger } from "../config/logger.js";
+
+export const aiService = {
+  async verify({ filePath, docType, deviceHash, submitterId }) {
+    if (!env.PYTHON_AI_URL) {
+      logger.info(`[aiService] Operating in STUB mode for docType: ${docType}`);
+
+      // Return fixed stub result as specified by spec
+      return {
+        docType: docType || "PASSPORT",
+        extracted: {
+          name: "STUB NAME",
+          docNumber: "STUB123456",
+          dob: "1990-01-01",
+          nationality: "IND",
+          expiry: "2030-01-01",
+          gender: "M",
+        },
+        layers: {
+          ocr: { passed: true, confidence: 0.9, notes: "Extracted MRZ text lines successfully." },
+          validation: { passed: true, confidence: 1.0, notes: "Doc number and expiry checksums valid." },
+          tampering: { passed: true, confidence: 0.9, notes: "No digital copy-move or ELA anomalies." },
+          face: { passed: true, confidence: 0.9, notes: "Document photo matches facial biometric embedding." },
+        },
+        overallScore: 10,
+        verdict: "PASS",
+        engineVersion: "stub-0.1",
+      };
+    }
+
+    try {
+      logger.info(`[aiService] Calling live Python AI service at ${env.PYTHON_AI_URL}/scan`);
+      const formData = new FormData();
+      formData.append("id_image", fs.createReadStream(filePath));
+      formData.append("doc_type", docType || "AADHAAR");
+      if (deviceHash) formData.append("deviceHash", deviceHash);
+      if (submitterId) formData.append("submitterId", submitterId);
+
+      const response = await axios.post(`${env.PYTHON_AI_URL}/scan`, formData, {
+        headers: {
+          ...formData.getHeaders(),
+          "X-API-Key": env.AI_API_KEY
+        },
+        timeout: 60000,
+      });
+
+      const aiData = response.data;
+      const isFormatValid = aiData.ocr?.is_valid_format || false;
+      const isTampered = aiData.tampering?.is_tampered || false;
+
+      const rawParsedFields = aiData.ocr?.parsed_fields;
+      const rawMrzParsed = aiData.ocr?.mrz_parsed;
+      const targetFields =
+        rawParsedFields && Object.keys(rawParsedFields).length > 0
+          ? rawParsedFields
+          : rawMrzParsed || {};
+
+      let nameVal = targetFields.name;
+      if (!nameVal && (targetFields.given_name || targetFields.surname)) {
+        nameVal = `${targetFields.given_name || ""} ${targetFields.surname || ""}`.trim();
+      }
+
+      const extracted = {
+        name: nameVal || null,
+        docNumber: targetFields.doc_number || targetFields.document_number || null,
+        dob: targetFields.dob || targetFields.date_of_birth || null,
+        age: targetFields.age != null ? String(targetFields.age) : null,
+        nationality: targetFields.nationality || "IND",
+        expiry: targetFields.expiry || targetFields.expiration_date || targetFields.valid_to || null,
+        gender: targetFields.gender || targetFields.sex || null,
+        address: targetFields.address || null,
+        issuingAuthority: targetFields.issuing_authority || null,
+      };
+
+      const textsExtracted = aiData.ocr?.texts_extracted || [];
+      const ocrPassed = textsExtracted.length > 5;
+
+      const checkObj = rawParsedFields || rawMrzParsed;
+      const hasParsedFieldValues =
+        checkObj &&
+        Object.values(checkObj).some(
+          (val) => val !== null && val !== undefined && val !== ""
+        );
+
+      let ocrConfidence = 0.3;
+      if (hasParsedFieldValues) {
+        ocrConfidence = 0.95;
+      } else if (textsExtracted.length > 0) {
+        ocrConfidence = 0.7;
+      }
+
+      let ocrNotes = "";
+      if (hasParsedFieldValues) {
+        ocrNotes = `Parsed key document fields successfully (${textsExtracted.length} text lines extracted).`;
+      } else if (textsExtracted.length > 0) {
+        ocrNotes = `Extracted ${textsExtracted.length} text lines, but key document fields could not be parsed.`;
+      } else {
+        ocrNotes = "No text lines extracted from document image.";
+      }
+
+      const riskAssessment = aiData.risk_assessment || {};
+      const compositeScore = (riskAssessment.composite_risk_score ?? 0) * 100;
+      const riskFlag = riskAssessment.flag || "LOW";
+      
+      let verdict = "PASS";
+      if (riskFlag === "HIGH") verdict = "FAIL";
+      else if (riskFlag === "REVIEW") verdict = "REVIEW";
+
+      return {
+        docType: docType || "AADHAAR",
+        extracted,
+        layers: {
+          ocr: {
+            passed: ocrPassed,
+            confidence: ocrConfidence,
+            notes: ocrNotes,
+            fields: targetFields,
+          },
+          validation: {
+            passed: isFormatValid,
+            confidence: isFormatValid ? 1.0 : 0.0,
+            notes: isFormatValid ? "Document format validation passed." : "Document format validation failed.",
+          },
+          tampering: {
+            passed: !isTampered,
+            confidence: parseFloat((1.0 - (aiData.tampering?.deep_model_prob || 0)).toFixed(2)),
+            notes: isTampered ? "Digital tampering / ELA anomaly detected." : "No digital copy-move or ELA anomalies.",
+            tampered_regions: aiData.tampering?.tampered_regions || [],
+            sift_copy_move_detected: aiData.tampering?.sift_copy_move_detected || false,
+            forensic_analysis: aiData.forensic_analysis || {},
+          },
+          face: { passed: true, confidence: 1.0, notes: "Face check not run (no selfie)" },
+        },
+        overallScore: compositeScore,
+        verdict: verdict,
+        engineVersion: "python-ai-1.0",
+        externalHits: aiData.external_database_hits || {},
+        networkRisk: aiData.network_risk || 0.0,
+      };
+    } catch (err) {
+      logger.error(`[aiService] Live AI service request failed: ${err.message}`);
+      throw new Error(`AI Verification service unavailable: ${err.message}`);
+    }
+  },
+
+  async checkHealth() {
+    if (!env.PYTHON_AI_URL) {
+      return { status: "stub", reachable: true };
+    }
+    try {
+      await axios.get(`${env.PYTHON_AI_URL}/`, { timeout: 3000 });
+      return { status: "live", reachable: true };
+    } catch (_err) {
+      return { status: "live", reachable: false };
+    }
+  },
+
+  async verifyWithFace({ documentPath, selfiePath, docType }) {
+    if (!env.PYTHON_AI_URL) {
+      logger.info("[aiService] Operating in STUB mode for face verification");
+      return {
+        face: { passed: true, confidence: 0.87, notes: "Face match (stub)" },
+        faceMatchScore: 0.87,
+      };
+    }
+
+    try {
+      logger.info(`[aiService] Calling live Python AI service /verify at ${env.PYTHON_AI_URL}`);
+      const formData = new FormData();
+      formData.append("id_image", fs.createReadStream(documentPath));
+      if (selfiePath) {
+        formData.append("selfie_image", fs.createReadStream(selfiePath));
+      }
+      formData.append("doc_type", docType || "AADHAAR");
+
+      const response = await axios.post(`${env.PYTHON_AI_URL}/verify`, formData, {
+        headers: {
+          ...formData.getHeaders(),
+          "X-API-Key": env.AI_API_KEY,
+        },
+        timeout: 60000,
+      });
+
+      const aiData = response.data;
+      
+      // The new endpoint directly returns the face comparison fields
+      const faceBio = aiData; 
+
+      let similarity = 0.85;
+      if (typeof faceBio.similarity_score === "number") {
+        similarity = faceBio.similarity_score;
+      } else if (typeof faceBio.confidence === "number") {
+        similarity = faceBio.confidence;
+      }
+
+      const passed = typeof faceBio.face_match === "boolean" ? faceBio.face_match : similarity >= 0.6;
+      let notes = `Face match ${(similarity * 100).toFixed(0)}%`;
+      
+      if (faceBio.id_face_detected === false) {
+        notes = "No face detected in document";
+      } else if (faceBio.selfie_face_detected === false) {
+        notes = "No face detected in selfie";
+      }
+
+      return {
+        face: {
+          passed: passed,
+          confidence: similarity,
+          notes: notes,
+        },
+        faceMatchScore: similarity,
+      };
+    } catch (err) {
+      logger.error(`[aiService] Live face verification request failed: ${err.message}`);
+      throw new Error(`AI Face Verification service unavailable: ${err.message}`);
+    }
+  },
+};

@@ -1,0 +1,138 @@
+import React from "react";
+import { Routes, Route, Navigate } from "react-router-dom";
+import { PrivateRoute } from "./PrivateRoute";
+import { RoleGuard } from "./RoleGuard";
+import { useAuth } from "../hooks/useAuth";
+import { AppShell } from "../components/layout/AppShell";
+
+import { LandingPage } from "../pages/Landing";
+import { LoginPage } from "../features/auth/LoginPage";
+import { RegisterPage } from "../features/auth/RegisterPage";
+import { DashboardPage } from "../features/documents/DashboardPage";
+import { SubmitterScanPage } from "../features/submitter/SubmitterScanPage";
+import { SubmissionsPage } from "../features/documents/SubmissionsPage";
+import { SubmissionDetailPage } from "../features/documents/SubmissionDetailPage";
+import { LiveFaceCapture } from "../features/documents/LiveFaceCapture";
+import { ReviewQueuePage } from "../features/reviews/ReviewQueuePage";
+import { ReviewDetailPage } from "../features/reviews/ReviewDetailPage";
+import { MyReviewsPage } from "../features/reviews/MyReviewsPage";
+import { AdminUsersPage } from "../features/admin/AdminUsersPage";
+import { AdminAuditPage } from "../features/admin/AdminAuditPage";
+import { AdminStatsPage } from "../features/admin/AdminStatsPage";
+import { ProfilePage } from "../pages/Profile";
+import { Forbidden403Page } from "../pages/Forbidden403";
+import { NotFound404Page } from "../pages/NotFound404";
+
+function SmartDashboard() {
+  const { user } = useAuth();
+  if (user?.role === "SUBMITTER") {
+    return <SubmitterScanPage />;
+  }
+  return <DashboardPage />;
+}
+
+export function AppRouter() {
+  return (
+    <Routes>
+      {/* Public Routes */}
+      <Route path="/" element={<LandingPage />} />
+      <Route path="/login" element={<Navigate to="/login/submitter" replace />} />
+      <Route path="/login/submitter" element={<LoginPage role="SUBMITTER" />} />
+      <Route path="/login/officer" element={<LoginPage role="OFFICER" />} />
+      <Route path="/login/admin" element={<LoginPage role="ADMIN" />} />
+
+      <Route path="/register" element={<Navigate to="/register/submitter" replace />} />
+      <Route path="/register/submitter" element={<RegisterPage role="SUBMITTER" />} />
+      <Route path="/register/officer" element={<RegisterPage role="OFFICER" />} />
+      <Route path="/403" element={<Forbidden403Page />} />
+
+      {/* Protected App Routes */}
+      <Route
+        path="/app"
+        element={
+          <PrivateRoute>
+            <AppShell />
+          </PrivateRoute>
+        }
+      >
+        <Route index element={<Navigate to="/app/dashboard" replace />} />
+        <Route path="dashboard" element={<SmartDashboard />} />
+
+        {/* Submitter Scan & Verification Terminal */}
+        <Route
+          path="scan"
+          element={
+            <RoleGuard allowedRoles={["SUBMITTER", "OFFICER"]}>
+              <SubmitterScanPage />
+            </RoleGuard>
+          }
+        />
+        <Route path="submit" element={<Navigate to="/app/scan" replace />} />
+
+        {/* Documents Routes */}
+        <Route path="submissions" element={<SubmissionsPage />} />
+        <Route path="submissions/:id" element={<SubmissionDetailPage />} />
+        <Route path="submissions/:id/face-verify" element={<LiveFaceCapture />} />
+
+        {/* Review Officer Routes */}
+        <Route
+          path="reviews/queue"
+          element={
+            <RoleGuard allowedRoles={["OFFICER", "ADMIN"]}>
+              <ReviewQueuePage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="reviews/:documentId"
+          element={
+            <RoleGuard allowedRoles={["OFFICER", "ADMIN"]}>
+              <ReviewDetailPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="reviews/mine"
+          element={
+            <RoleGuard allowedRoles={["OFFICER"]}>
+              <MyReviewsPage />
+            </RoleGuard>
+          }
+        />
+
+        {/* Admin Routes */}
+        <Route
+          path="admin/users"
+          element={
+            <RoleGuard allowedRoles={["ADMIN"]}>
+              <AdminUsersPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="admin/audit"
+          element={
+            <RoleGuard allowedRoles={["ADMIN"]}>
+              <AdminAuditPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="admin/stats"
+          element={
+            <RoleGuard allowedRoles={["ADMIN"]}>
+              <AdminStatsPage />
+            </RoleGuard>
+          }
+        />
+
+        <Route path="profile" element={<ProfilePage />} />
+      </Route>
+
+      {/* Catch-all 404 */}
+      <Route path="*" element={<NotFound404Page />} />
+    </Routes>
+  );
+}
+
+export default AppRouter;
